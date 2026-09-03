@@ -304,8 +304,10 @@ class CompletionDetector:
         The DOM
         ``has_action`` fallback gate is unchanged — ``backend_fetch_failed`` is
         set ONLY on ``fetch_failed`` (true transport failure), NOT on
-        ``not_ready``/``ambiguous``/``degraded_not_fresh`` (which collapse to
-        ``not_ready`` and must NOT unlock the DOM fallback).
+        `
+ot_ready``/``ambiguous``/``degraded_not_fresh`` (which collapse to
+        `
+ot_ready`` and must NOT unlock the DOM fallback).
 
         P1 (2026-07-08): ``budgets`` and ``model`` enable the model-aware
         two-state phase-2 machine. When ``budgets`` is None, the legacy
@@ -479,17 +481,20 @@ class CompletionDetector:
                     "  var last = msgs[msgs.length - 1];"
                     # Text: the clean answer lives in ``.markdown`` textContent.
                     # It's empty during streaming and populates as the turn
-                    # settles — so we ALSO capture ``innerText`` (populated
-                    # during streaming) as a fallback. innerText includes the
-                    # reasoning UI label ("Thinking.../Thought for N seconds"),
-                    # so md_text is captured SEPARATELY and Python prefers it;
-                    # the innerText fallback is trimmed of the leading label.
+                    # settles — so we ALSO capture text populated during
+                    # streaming as a fallback. The live message can contain a
+                    # localized reasoning UI section whose label is included by
+                    # innerText, so remove that structural section from a clone
+                    # before reading the fallback. The clone keeps the live DOM
+                    # untouched and makes the filtering independent of locale.
                     "  var md = last.querySelector('.markdown');"
                     "  var mdText = md ? (md.textContent || '') : '';"
-                    "  var rawText = (last.innerText || '').trim();"
-                    # Strip a leading "Thinking..." / "Thought for …" reasoning
-                    # label so the innerText fallback can't leak it as a delta.
-                    "  var text = mdText || rawText.replace(/^Think(ing|\\s+for)[^\\n]*\\n?/i, '');"
+                    "  var fallback = last.cloneNode(true);"
+                    "  Array.prototype.forEach.call(fallback.querySelectorAll('[aria-busy=\"true\"], .result-thinking, .loading-shimmer-tertiary'), function(el) {"
+                    "    el.remove();"
+                    "  });"
+                    "  var rawText = (fallback.innerText || fallback.textContent || '').trim();"
+                    "  var text = mdText || rawText;"
                     "  var html_len = last.innerHTML.length;"
                     "  var child_count = last.children.length;"
                     # has_action: the per-turn copy/feedback action row appears

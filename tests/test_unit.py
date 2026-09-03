@@ -125,6 +125,29 @@ def test_server_creates():
         assert handler_type in server.request_handlers, f"Missing handler: {handler_type.__name__}"
 
 
+@pytest.mark.asyncio
+async def test_run_mcp_propagates_singleton_connect_failure(monkeypatch):
+    """A singleton worker must fail startup when its CDP connection fails."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    import chatgpt_web2api.mcp_server as mcp_mod
+    from chatgpt_web2api.config import Config
+
+    driver = MagicMock()
+    driver.connect = AsyncMock(side_effect=RuntimeError("CDP unavailable"))
+    driver.close = AsyncMock()
+    monkeypatch.setattr(mcp_mod, "CDPDriver", MagicMock(return_value=driver))
+
+    try:
+        with pytest.raises(RuntimeError, match="CDP unavailable"):
+            await mcp_mod.run_mcp(Config(), transport="sse", port=8090)
+        driver.close.assert_awaited_once()
+    finally:
+        mcp_mod._driver = None
+        mcp_mod._driver_pool = None
+        mcp_mod._breakers = None
+
+
 def test_stream_chunk_dataclass():
     """StreamChunk works as expected."""
     from chatgpt_web2api.cdp_driver import StreamChunk

@@ -148,6 +148,46 @@ async def test_reasoning_first_content_survives_past_90s(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_localized_reasoning_label_is_not_streamed_as_answer():
+    """A localized reasoning label must not become an irreversible first delta.
+
+    The browser-side phase-2 expression is the seam under test: before the
+    answer markdown exists, an old expression exposes ``innerText`` from the
+    reasoning section and emits it. The corrected expression removes that
+    section from a clone, so the first usable delta is the actual answer.
+    """
+    detector, driver = _make_detector(conv_id="")
+    state = {"phase2": 0}
+
+    async def fake_js(expr):
+        if "getBoundingClientRect" in expr:
+            state["phase2"] += 1
+            if state["phase2"] == 1:
+                structural_filter = (
+                    "cloneNode(true)" in expr
+                    and "aria-busy" in expr
+                    and "loading-shimmer-tertiary" in expr
+                )
+                return _phase2_poll_payload(
+                    text="" if structural_filter else "R\u00e9flexion",
+                )
+            return _phase2_poll_payload(text="PONG", md_text="PONG", has_action=True)
+        if "innerText" in expr:
+            return '{"text": ""}'
+        return "1"
+
+    driver._js_strict = fake_js
+    seen = []
+    async for chunk in detector.stream_until_complete(
+        initial_count=0,
+        timeout=5,
+        turn_anchor=TurnAnchor(sent_text="ping", mode="fresh_chat"),
+    ):
+        seen.append(chunk.delta)
+
+    assert seen == ["PONG"]
+
+
 async def test_stream_idle_uses_shorter_budget_after_first_content(monkeypatch):
     """Once text has appeared and then stopped progressing, the stream-idle
     budget applies — which is shorter than first-content for reasoning models.

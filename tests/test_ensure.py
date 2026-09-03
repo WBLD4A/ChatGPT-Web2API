@@ -532,6 +532,22 @@ def test_find_listener_pid_uses_netstat_on_windows(monkeypatch):
         lsof_mock.assert_not_called()
 
 
+def test_find_listener_pid_netstat_replaces_invalid_output_bytes():
+    """A non-decodable locale byte must not hide a valid LISTENING record."""
+    from unittest.mock import patch
+
+    output = b"\x90\r\n  TCP    127.0.0.1:8080    0.0.0.0:0    LISTENING    4242\r\n"
+    with patch.object(ensure_mod.subprocess, "check_output", return_value=output) as check:
+        assert ensure_mod._find_listener_pid_netstat(8080) == 4242
+
+    check.assert_called_once_with(
+        ["netstat", "-ano"],
+        text=False,
+        stderr=ensure_mod.subprocess.DEVNULL,
+        timeout=5,
+    )
+
+
 def test_find_listener_pid_unix_lsof_found(monkeypatch):
     """On Unix, when lsof succeeds, its PID is returned (no fallback needed)."""
     from unittest.mock import patch

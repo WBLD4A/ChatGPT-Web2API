@@ -320,7 +320,8 @@ def _find_listener_pid(port: int) -> int | None:
     """Find the PID listening on the given TCP port (loopback). Returns None
     if nothing is listening or the lookup fails.
 
-    Windows: ``netstat -ano`` (ubiquitous). Unix: a fallback chain of
+    Windows: `
+etstat -ano`` (ubiquitous). Unix: a fallback chain of
     ``lsof`` → ``ss`` → ``fuser`` — no single tool is guaranteed on every
     distro/container, so we try each in turn. Returns the first PID found.
     """
@@ -336,8 +337,8 @@ def _find_listener_pid(port: int) -> int | None:
 def _find_listener_pid_netstat(port: int) -> int | None:
     try:
         out = subprocess.check_output(
-            ["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL, timeout=5
-        )
+            ["netstat", "-ano"], text=False, stderr=subprocess.DEVNULL, timeout=5
+        ).decode(errors="replace")
         for line in out.splitlines():
             parts = line.split()
             # parts[1] is "HOST:PORT" (e.g. "127.0.0.1:8080"). endswith is

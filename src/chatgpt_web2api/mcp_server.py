@@ -1412,7 +1412,8 @@ def build_tools() -> list[mcp_types.Tool]:
       - Destructive tools require ``W2A_ENABLE_DESTRUCTIVE=1``.
 
     This is the runtime entrypoint used by ``list_tools``. Every
-    returned tool carries honest ``noauth`` auth metadata when the
+    returned tool carries honest `
+oauth`` auth metadata when the
     server has no API keys configured.
     """
     visible = _visible_tool_names()
@@ -2175,7 +2176,7 @@ async def run_mcp(config: Config, transport: str = "stdio", port: int = 8090) ->
                 e,
             )
             await _driver.close()
-            return
+            raise
 
     server = create_server()
     init_options = server.create_initialization_options()
