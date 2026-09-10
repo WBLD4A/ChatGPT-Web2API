@@ -272,7 +272,7 @@ class McpSessionDriverPool:
         import hashlib
         import os
 
-        from .cdp_driver import CDPDriver
+        from .project_navigation import ProjectAwareCDPDriver as CDPDriver
         from .tab_registry import TabRegistry
 
         cfg = self._config
