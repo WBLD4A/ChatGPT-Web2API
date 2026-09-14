@@ -263,7 +263,7 @@ class CompletionDetector:
         must surface as auth expiry, not degrade to a generic stall (PR #39
         review finding #2 invariant — auth failure never degrades).
         """
-        from .cdp_driver import AuthExpiredError
+        from .cdp_driver import AuthExpiredError, RateLimitError
         from .turn_anchor import collapse_to_end_turn_status
 
         if not conv_id:
@@ -277,6 +277,8 @@ class CompletionDetector:
             return status == "complete"
         except AuthExpiredError:
             raise  # never swallow auth expiry — it must surface as auth expiry
+        except RateLimitError:
+            raise  # preserve a persistent backend projection limit
         except Exception as e:
             logger.debug("Final reconciliation fetch failed: %s", e)
             return False
@@ -717,6 +719,9 @@ ot_ready`` and must NOT unlock the DOM fallback).
                     # Auth failure must NEVER degrade to DOM fallback.
                     # (PR #39 review finding #2 — the prior broad except
                     # swallowed this, violating "auth failure never degrades.")
+                    raise
+                except RateLimitError:
+                    # A persistent projection limit must remain machine-readable.
                     raise
                 except Exception as e:
                     # Transport/backend failure — treat as fetch_failed so the

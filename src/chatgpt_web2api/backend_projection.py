@@ -6,7 +6,8 @@ isolation (``tests/test_backend_projection_js.py``) without needing the driver.
 
 Design (peer-reviewed, conv ``6a482cfd``):
   - Fetch ``/backend-api/conversation/{id}?offset=0&limit={TURN_PROJECTION_LIMIT}``.
-  - Status-decode: 401 → AuthExpiredError+trip, 404 → _Transient404, other → RuntimeError.
+  - Status-decode: 401 → AuthExpiredError+trip, 404 → _Transient404,
+    429 → RateLimitError, other → RuntimeError.
   - Project to compact schema preserving ALL nodes as graph skeletons:
     drop heavy payload fields only (reasoning internals, tool metadata, citations,
     assets), NOT the nodes themselves. Intermediary nodes (reasoning_recap,
@@ -36,15 +37,21 @@ TURN_PROJECTION_LIMIT = int(os.getenv("W2A_TURN_PROJECTION_LIMIT", "50"))
 #   __D.limit    — the node limit (TURN_PROJECTION_LIMIT)
 #
 # Returns a JSON string. On non-OK HTTP, returns ``{"__status": <code>}``
-# so the Python caller can status-decode (the ``__status`` blob convention
-# decoded in ``_fetch_recent_conversation_projection``).
+# plus an optional ``__retry_after`` value so the Python caller can
+# status-decode (the blob convention decoded in
+# ``_fetch_recent_conversation_projection``).
 CONVERSATION_PROJECTION_JS = """
 (async function() {
   try {
     var r = await fetch('/backend-api/conversation/' + __D.conv_id + '?offset=0&limit=' + __D.limit, {
       headers: {'Authorization': 'Bearer ' + __D.token}
     });
-    if (!r.ok) return JSON.stringify({__status: r.status});
+    if (!r.ok) {
+      return JSON.stringify({
+        __status: r.status,
+        __retry_after: r.headers.get('Retry-After')
+      });
+    }
     var conv = await r.json();
     var mapping = conv.mapping || {};
     var projected = {};

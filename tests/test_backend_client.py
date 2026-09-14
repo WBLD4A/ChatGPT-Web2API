@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from chatgpt_web2api.backend_client import TOKEN_TTL_SECONDS, BackendClient
+from chatgpt_web2api.cdp_driver import RateLimitError
 
 
 def _make_client():
@@ -36,6 +37,93 @@ def _make_client():
     driver.ensure_token = AsyncMock(return_value="tok")
     driver._refresh_token = AsyncMock()
     return BackendClient(driver), driver
+
+
+@pytest.mark.asyncio
+async def test_projection_429_retries_observation_and_preserves_retry_after(monkeypatch):
+    client, driver = _make_client()
+    driver._js_with_data_strict = AsyncMock(
+        side_effect=[
+            json.dumps({"__status": 429, "__retry_after": "2"}),
+            json.dumps({"nodes": {}, "current_node": None}),
+        ]
+    )
+    driver.dismiss_rate_limit = AsyncMock(return_value=False)
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("chatgpt_web2api.resilience.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("chatgpt_web2api.resilience.random.uniform", lambda *_: 0.0)
+
+    result = await client._fetch_recent_conversation_projection("conv-1")
+
+    assert result == {"nodes": {}, "current_node": None}
+    assert driver._js_with_data_strict.await_count == 2
+    driver.dismiss_rate_limit.assert_awaited_once()
+    assert slept == [2]
+
+
+@pytest.mark.asyncio
+async def test_projection_429_persistent_limit_remains_typed(monkeypatch):
+    client, driver = _make_client()
+    driver._js_with_data_strict = AsyncMock(
+        return_value=json.dumps({"__status": 429, "__retry_after": "7"})
+    )
+    driver.dismiss_rate_limit = AsyncMock(return_value=False)
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("chatgpt_web2api.resilience.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("chatgpt_web2api.resilience.random.uniform", lambda *_: 0.0)
+
+    with pytest.raises(RateLimitError) as exc_info:
+        await client._fetch_recent_conversation_projection("conv-1")
+
+    assert exc_info.value.retry_after == 7
+    assert driver._js_with_data_strict.await_count == 3
+    assert driver.dismiss_rate_limit.await_count == 2
+    assert slept == [7, 7]
+
+
+@pytest.mark.asyncio
+async def test_projection_429_invalid_retry_after_uses_default(monkeypatch):
+    client, driver = _make_client()
+    driver._js_with_data_strict = AsyncMock(
+        return_value=json.dumps({"__status": 429, "__retry_after": "invalid"})
+    )
+    driver.dismiss_rate_limit = AsyncMock(return_value=False)
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("chatgpt_web2api.resilience.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("chatgpt_web2api.resilience.random.uniform", lambda *_: 0.0)
+
+    with pytest.raises(RateLimitError) as exc_info:
+        await client._fetch_recent_conversation_projection("conv-1")
+
+    assert exc_info.value.retry_after == 60
+    assert slept == [60, 60]
+
+
+@pytest.mark.asyncio
+async def test_projection_rate_limit_is_not_converted_to_fetch_failed():
+    client, _ = _make_client()
+    client._fetch_recent_conversation_projection = AsyncMock(
+        side_effect=RateLimitError(retry_after=7)
+    )
+
+    with pytest.raises(RateLimitError):
+        await client._fetch_text_for_turn("conv-1", object())
+    with pytest.raises(RateLimitError):
+        await client._fetch_end_turn_for_turn(
+            "conv-1", object(), had_non_text_content=False
+        )
 
 
 # ── 1. Every moved method exists on BackendClient ─────────────────────

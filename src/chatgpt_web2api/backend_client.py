@@ -263,7 +263,8 @@ class BackendClient:
     #
     # Status-decode convention: 401 → AuthExpiredError+trip, 404 →
     # _Transient404 (transient race, swallowed by the wrappers below),
-    # other non-OK → RuntimeError, transport failure → fetch_failed status.
+    # 429 → RateLimitError with bounded observation retry, other non-OK →
+    # RuntimeError, transport failure → fetch_failed status.
 
     async def _fetch_recent_conversation_projection(
         self, conversation_id: str
@@ -273,57 +274,79 @@ class BackendClient:
         Executes ``CONVERSATION_PROJECTION_JS`` via the driver's
         ``_js_with_data_strict``. Returns the projected dict
         (``{"nodes": {...}, "current_node": ...}``). Raises ``AuthExpiredError``
-        on 401 (with breaker trip), ``_Transient404`` on 404, ``RuntimeError``
-        on other non-OK status, and ``CDPJSError`` on transport failure.
+        on 401 (with breaker trip), ``_Transient404`` on 404,
+        ``RateLimitError`` on 429 after bounded observation retries,
+        ``RuntimeError`` on other non-OK status, and ``CDPJSError`` on
+        transport failure.
         """
         from .backend_projection import CONVERSATION_PROJECTION_JS, TURN_PROJECTION_LIMIT
-        from .cdp_driver import AuthExpiredError, CDPJSError
+        from .cdp_driver import (
+            RATE_LIMIT_DEFAULT_RETRY_AFTER,
+            AuthExpiredError,
+            CDPJSError,
+            RateLimitError,
+        )
+        from .resilience import retry_on_rate_limit
 
         d = self._driver
         await self._driver.ensure_token()
-        raw = await d._js_with_data_strict(
-            CONVERSATION_PROJECTION_JS,
-            {
-                "conv_id": conversation_id,
-                "token": d._access_token,
-                "limit": TURN_PROJECTION_LIMIT,
-            },
-            timeout=15,
-        )
-        if not raw:
-            raise CDPJSError("projection returned empty")
-        # Status-decode (the ``__status`` blob shape).
-        if raw.startswith('{"__status"') or raw.startswith('{ "__status"'):
+
+        async def _fetch_projection() -> dict:
+            raw = await d._js_with_data_strict(
+                CONVERSATION_PROJECTION_JS,
+                {
+                    "conv_id": conversation_id,
+                    "token": d._access_token,
+                    "limit": TURN_PROJECTION_LIMIT,
+                },
+                timeout=15,
+            )
+            if not raw:
+                raise CDPJSError("projection returned empty")
+            # Status-decode (the ``__status`` blob shape).
+            if raw.startswith('{"__status"') or raw.startswith('{ "__status"'):
+                try:
+                    payload = json.loads(raw)
+                    status = payload.get("__status")
+                except (json.JSONDecodeError, TypeError):
+                    status = None
+                    payload = {}
+                if status == 401:
+                    if d._breakers:
+                        d._breakers.trip(BreakerKind.AUTH_EXPIRED, "HTTP 401 from backend-api")
+                    raise AuthExpiredError()
+                if status == 404:
+                    raise _Transient404(conversation_id)
+                if status == 429:
+                    retry_after = payload.get("__retry_after")
+                    try:
+                        retry_after = int(retry_after)
+                    except (TypeError, ValueError):
+                        retry_after = RATE_LIMIT_DEFAULT_RETRY_AFTER
+                    if retry_after < 0:
+                        retry_after = RATE_LIMIT_DEFAULT_RETRY_AFTER
+                    raise RateLimitError(retry_after=retry_after)
+                if status is not None:
+                    raise RuntimeError(f"projection HTTP {status} for {conversation_id}")
+            # Decode projection JS errors (the JS catches exceptions and returns
+            # {"__error": "..."}). Without this, a projection error would reach
+            # the selector as an empty mapping → not_ready → the detector would
+            # NOT unlock DOM fallback → reconciliation timeout instead of
+            # fetch_failed. (PR #39 review finding #1.)
+            if raw.startswith('{"__error"') or raw.startswith('{ "__error"'):
+                try:
+                    payload = json.loads(raw)
+                    err_msg = payload.get("__error", "unknown projection error")
+                except (json.JSONDecodeError, TypeError):
+                    err_msg = "projection returned unparseable error blob"
+                raise CDPJSError(f"projection JS error for {conversation_id}: {err_msg}")
+            # Parse the projected mapping.
             try:
-                payload = json.loads(raw)
-                status = payload.get("__status")
-            except (json.JSONDecodeError, TypeError):
-                status = None
-            if status == 401:
-                if d._breakers:
-                    d._breakers.trip(BreakerKind.AUTH_EXPIRED, "HTTP 401 from backend-api")
-                raise AuthExpiredError()
-            if status == 404:
-                raise _Transient404(conversation_id)
-            if status is not None:
-                raise RuntimeError(f"projection HTTP {status} for {conversation_id}")
-        # Decode projection JS errors (the JS catches exceptions and returns
-        # {"__error": "..."}). Without this, a projection error would reach
-        # the selector as an empty mapping → not_ready → the detector would
-        # NOT unlock DOM fallback → reconciliation timeout instead of
-        # fetch_failed. (PR #39 review finding #1.)
-        if raw.startswith('{"__error"') or raw.startswith('{ "__error"'):
-            try:
-                payload = json.loads(raw)
-                err_msg = payload.get("__error", "unknown projection error")
-            except (json.JSONDecodeError, TypeError):
-                err_msg = "projection returned unparseable error blob"
-            raise CDPJSError(f"projection JS error for {conversation_id}: {err_msg}")
-        # Parse the projected mapping.
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError) as e:
-            raise CDPJSError(f"projection returned unparseable JSON: {e}") from e
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise CDPJSError(f"projection returned unparseable JSON: {e}") from e
+
+        return await retry_on_rate_limit(d, _fetch_projection, max_attempts=3)
 
     async def _fetch_text_for_turn(
         self, conversation_id: str, anchor
@@ -337,7 +360,7 @@ class BackendClient:
         Transport failures map to ``fetch_failed`` (caller keeps polling);
         auth failures propagate as ``AuthExpiredError`` (never degrades).
         """
-        from .cdp_driver import AuthExpiredError, CDPJSError
+        from .cdp_driver import AuthExpiredError, CDPJSError, RateLimitError
         from .turn_anchor import TurnTextResult, select_text_for_turn
 
         try:
@@ -345,6 +368,8 @@ class BackendClient:
             return select_text_for_turn(mapping, anchor)
         except AuthExpiredError:
             raise  # hard fail — never degrade on auth
+        except RateLimitError:
+            raise  # preserve a persistent projection limit for the caller
         except _Transient404:
             # Transient race — mapping not yet propagated. Treat as not_ready.
             return TurnTextResult("not_ready", diagnostic={"reason": "transient_404"})
@@ -364,7 +389,7 @@ class BackendClient:
         content-guard decision lives in the selector where the correlated
         node identity is known (ChatGPT round 4 refinement).
         """
-        from .cdp_driver import AuthExpiredError, CDPJSError
+        from .cdp_driver import AuthExpiredError, CDPJSError, RateLimitError
         from .turn_anchor import TurnEndResult, select_end_turn_for_turn
 
         try:
@@ -374,6 +399,8 @@ class BackendClient:
             )
         except AuthExpiredError:
             raise  # hard fail — never degrade on auth
+        except RateLimitError:
+            raise  # preserve a persistent projection limit for the caller
         except _Transient404:
             return TurnEndResult("not_ready", diagnostic={"reason": "transient_404"})
         except (CDPJSError, RuntimeError) as e:

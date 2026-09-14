@@ -45,6 +45,10 @@ class TestProjectionConstant:
     def test_js_status_decode(self):
         assert "__status" in CONVERSATION_PROJECTION_JS
 
+    def test_js_preserves_retry_after_for_rate_limit(self):
+        assert "__retry_after" in CONVERSATION_PROJECTION_JS
+        assert "Retry-After" in CONVERSATION_PROJECTION_JS
+
     def test_js_projects_to_compact_schema(self):
         # The JS must output {nodes: {...}, current_node: ...}.
         assert "nodes" in CONVERSATION_PROJECTION_JS

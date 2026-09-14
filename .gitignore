@@ -10,6 +10,7 @@ captured_*.json
 sentinel_flow.json
 .chrome-profile/
 config.json
+.venv/
 
 # Local server logs (REST proxy / SSE server dev output)
 .rest-proxy.log
