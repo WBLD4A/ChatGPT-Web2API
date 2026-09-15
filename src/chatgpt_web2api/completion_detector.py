@@ -242,6 +242,10 @@ class CompletionDetector:
         # Per-call results surfaced for the driver tail; reset each call.
         self.last_dom_text: str = ""
         self.had_non_text_content: bool = False
+        # Set only from an existing driver identity or a verified live /c/{id}
+        # URL during this call. The driver tail uses it as a safe fallback
+        # when the later URL probe has a transient CDP failure.
+        self.resolved_conversation_id: str = ""
 
     async def _reconcile_before_stall(
         self, d, conv_id: str, turn_anchor, had_non_text_content: bool,
@@ -347,6 +351,9 @@ ot_ready`` and must NOT unlock the DOM fallback).
         # Reset per-call results surfaced to the driver tail.
         self.last_dom_text = ""
         self.had_non_text_content = False
+        # Preserve a pre-existing, already-verified continuation identity and
+        # clear it for a new-chat send until the live URL resolves.
+        self.resolved_conversation_id = d._current_conv_id or ""
 
         # Wait for a new assistant message. The full `timeout` governs (was
         # capped at 60s, which killed slow-to-appear responses like image
@@ -660,6 +667,10 @@ ot_ready`` and must NOT unlock the DOM fallback).
                     try:
                         conv_id_for_check = await d._get_live_conversation_id_best_effort()
                         if conv_id_for_check:
+                            # This value came from the existing conversation
+                            # state or the live /c/{id} URL resolver. Publish it
+                            # for the driver tail; never use the request UUID.
+                            self.resolved_conversation_id = conv_id_for_check
                             logger.info(
                                 "Resolved conversation id mid-loop: %s",
                                 conv_id_for_check,
