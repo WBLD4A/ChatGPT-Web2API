@@ -264,3 +264,120 @@ async def test_is_thinking_does_not_block_backend_completion(monkeypatch):
     deltas = [c.delta for c in chunks if c.delta]
     assert any("Answer" in c for c in deltas), f"deltas: {deltas}"
     assert chunks[-1].finish_reason == "stop"
+
+
+# ── 6. Late URL-probe failure preserves a verified mid-loop identity ────────
+
+
+@pytest.mark.asyncio
+async def test_late_conversation_id_survives_post_loop_cdp_timeout(monkeypatch):
+    """A new-chat URL can be readable during completion polling but fail on
+    the later driver-tail probe. The verified mid-loop id must reach the
+    terminal result so the broker can persist it."""
+    d = _make_driver()
+    _install_virtual_clock(monkeypatch)
+    state = {"length_calls": 0, "phase2": 0}
+
+    async def _fake_js(expr, timeout=15):
+        if "body.innerText" in expr:
+            return json.dumps({"text": "normal"})
+        if "has_action" in expr:
+            state["phase2"] += 1
+            return json.dumps({
+                "text": "Answer.",
+                "md_text": "Answer.",
+                "html_len": 100,
+                "child_count": 1,
+                "has_action": False,
+                "is_thinking": False,
+            })
+        if ".length" in expr and "querySelectorAll" in expr and "JSON.stringify" not in expr:
+            state["length_calls"] += 1
+            # Two calls establish the assistant/user pre-send baseline; the
+            # following call observes the new assistant node.
+            return "0" if state["length_calls"] <= 2 else "1"
+        if "userCount" in expr:
+            return json.dumps({
+                "userCount": 1,
+                "composerPresent": True,
+                "composerEmpty": True,
+            })
+        if "location.href" in expr:
+            raise TimeoutError("CDP timeout: Runtime.evaluate")
+        return ""
+
+    d._js_strict = _fake_js
+    d._get_live_conversation_id_best_effort = AsyncMock(return_value="late-conv-id")
+    d.type_message = AsyncMock()
+    d.click_send = AsyncMock()
+    d._fetch_end_turn_for_turn = AsyncMock(
+        return_value=TurnEndResult(status="matched")
+    )
+    d._fetch_text_for_turn = AsyncMock(
+        return_value=TurnTextResult(status="matched", text="Answer.")
+    )
+
+    chunks = []
+    async for chunk in d.send_and_stream("hello", timeout=10000):
+        chunks.append(chunk)
+
+    assert d._current_conv_id == "late-conv-id"
+    assert d._fetch_text_for_turn.await_args.args[0] == "late-conv-id"
+    assert chunks[-1].finish_reason == "stop"
+
+
+# ── 7. No unverified identity is invented on a post-loop timeout ───────────
+
+
+@pytest.mark.asyncio
+async def test_post_loop_timeout_without_verified_identity_remains_fail_closed(monkeypatch):
+    """If neither the completion loop nor the final URL probe verifies a
+    conversation id, the driver must not invent one from the request UUID."""
+    d = _make_driver()
+    _install_virtual_clock(monkeypatch)
+    state = {"length_calls": 0, "phase2": 0}
+
+    async def _fake_js(expr, timeout=15):
+        if "body.innerText" in expr:
+            return json.dumps({"text": "normal"})
+        if "has_action" in expr:
+            state["phase2"] += 1
+            return json.dumps({
+                "text": "Answer.",
+                "md_text": "Answer.",
+                "html_len": 100,
+                "child_count": 1,
+                "has_action": False,
+                "is_thinking": False,
+            })
+        if ".length" in expr and "querySelectorAll" in expr and "JSON.stringify" not in expr:
+            state["length_calls"] += 1
+            return "0" if state["length_calls"] <= 2 else "1"
+        if "userCount" in expr:
+            return json.dumps({
+                "userCount": 1,
+                "composerPresent": True,
+                "composerEmpty": True,
+            })
+        if "location.href" in expr:
+            raise TimeoutError("CDP timeout: Runtime.evaluate")
+        return ""
+
+    d._js_strict = _fake_js
+    d._get_live_conversation_id_best_effort = AsyncMock(return_value="")
+    d.type_message = AsyncMock()
+    d.click_send = AsyncMock()
+    d._fetch_end_turn_for_turn = AsyncMock(
+        return_value=TurnEndResult(status="matched")
+    )
+    d._fetch_text_for_turn = AsyncMock(
+        return_value=TurnTextResult(status="matched", text="Answer.")
+    )
+
+    chunks = []
+    async for chunk in d.send_and_stream("hello", timeout=10000):
+        chunks.append(chunk)
+
+    assert d._current_conv_id is None
+    assert d._fetch_text_for_turn.await_count == 0
+    assert chunks[-1].finish_reason == "stop"
