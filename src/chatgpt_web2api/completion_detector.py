@@ -206,6 +206,7 @@ class DetectorBudgets:
 # chat content (e.g. a user asking about "rate limits" in a message).
 _RATE_LIMIT_PHRASES = (
     "too many requests",
+    "trop de requêtes",
     "you're making requests too quickly",
     "temporarily limited access to your conversations",
     "you've reached the rate limit",
