@@ -72,6 +72,9 @@ _PROGRESS_EVERY_N_CHUNKS = 10
 # progress (no token) and the business function must skip emitting.
 ProgressCallback = Callable[[str], Awaitable[None]]
 
+# The legacy wrapper timeout is still the minimum for ordinary completions.
+_DEFAULT_COMPLETION_TIMEOUT_SECONDS = 120
+
 
 # ═══════════════════════════════════════════════════════════════
 # Input Schemas — Pydantic BaseModel (official pattern from mcp-server-git)
@@ -711,6 +714,16 @@ _MUTATING_TOOLS = frozenset(
 # ═══════════════════════════════════════════════════════════════
 
 
+def _resolve_completion_timeout(budgets) -> float:
+    """Keep the wrapper alive for the selected detector first-content budget."""
+    if budgets is None:
+        return _DEFAULT_COMPLETION_TIMEOUT_SECONDS
+    return max(
+        _DEFAULT_COMPLETION_TIMEOUT_SECONDS,
+        budgets.first_content_timeout_seconds,
+    )
+
+
 async def _notify(on_progress: ProgressCallback | None, message: str) -> None:
     """Invoke a progress callback if present, swallowing any error.
 
@@ -787,8 +800,9 @@ async def do_chat_completion(
         if config is not None
         else None
     )
+    completion_timeout = _resolve_completion_timeout(_budgets)
     async for chunk in driver.send_and_stream(
-        full_text, timeout=120, budgets=_budgets, model=validated.model,
+        full_text, timeout=completion_timeout, budgets=_budgets, model=validated.model,
     ):
         if chunk.delta:
             full_response += chunk.delta
