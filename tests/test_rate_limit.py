@@ -24,6 +24,9 @@ def test_rate_limit_exception_is_runtime_subclass():
     ("Too many requests", True),
     ("You're making requests too quickly. We've temporarily limited "
      "access to your conversations to protect your data.", True),
+    # French ChatGPT rate-limit dialog observed by the Orchestrator worker
+    ("Trop de requêtes. Veuillez réessayer plus tard.", True),
+    ("TROP DE REQUÊTES", True),
     # Case / whitespace insensitive
     ("  too many requests  ", True),
     ("TOO MANY REQUESTS", True),
