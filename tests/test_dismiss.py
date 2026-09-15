@@ -66,6 +66,40 @@ async def test_dismiss_returns_false_when_popup_persists():
 
 
 @pytest.mark.asyncio
+async def test_dismiss_returns_false_when_localized_popup_persists():
+    """A French rate-limit dialog that survives the click remains retryable."""
+    driver = _driver_with_js_sequence([
+        json.dumps({"clicked": True}),
+        json.dumps({"text": "Trop de requêtes. Veuillez réessayer plus tard."}),
+    ])
+
+    result = await driver.dismiss_rate_limit()
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_dismiss_targets_localized_dialog_and_acknowledgement():
+    """The click script must recognize the observed French dialog and button."""
+    driver = CDPDriver(cdp_port=9222)
+    expressions = []
+
+    async def fake_js(expr, timeout=15):
+        expressions.append(expr)
+        if len(expressions) == 1:
+            localized_selectors_present = (
+                "trop de requêtes" in expr.lower()
+                and "j[’']ai compris" in expr.lower()
+            )
+            return json.dumps({"clicked": localized_selectors_present})
+        return json.dumps({"text": "Normal page content, no popup"})
+
+    driver._js_strict = fake_js
+
+    assert await driver.dismiss_rate_limit() is True
+
+
+@pytest.mark.asyncio
 async def test_dismiss_returns_false_when_no_got_it_button():
     """If the 'Got it' button isn't found, no click happens; return False."""
     driver = _driver_with_js_sequence([
