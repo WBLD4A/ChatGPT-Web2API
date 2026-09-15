@@ -87,8 +87,9 @@ logger = logging.getLogger(__name__)
 # is_thinking reset covers the labeled phase, but there is an unlabeled gap
 # between thinking-end and answer-start that also needs this headroom.
 #
-# P1 (2026-07-08): this constant is now the FALLBACK for phase_1_appear
-# (unchanged behavior) and the default-class phase-2 budgets when no
+# P1 (2026-07-08): this constant is the FALLBACK for phase_1_appear
+# when no per-call DetectorBudgets are resolved, and for the default-class
+# phase-2 budgets when no
 # DetectorBudgets is resolved. Phase-2 detection has been refactored into a
 # model-aware two-state machine (awaiting_first_content →
 # streaming_after_first_content) with budgets from DetectorBudgets. See
@@ -139,6 +140,11 @@ def classify_model(model: str | None) -> str:
     if not model:
         return "default"
     lowered = model.lower()
+    if lowered == "auto":
+        # The auto selector delegates model choice to ChatGPT. Its latency class
+        # is unknown to the connector, so use the reasoning first-content
+        # budget rather than falsely applying the shorter default window.
+        return "reasoning"
     if any(marker in lowered for marker in _REASONING_MARKERS):
         return "reasoning"
     return "default"
@@ -200,6 +206,18 @@ class DetectorBudgets:
             stream_idle_timeout_seconds=config.detector_default_stream_idle_timeout_seconds,
             hard_timeout_seconds=config.detector_hard_timeout_seconds,
         )
+
+def resolve_phase_1_stall_seconds(budgets: DetectorBudgets | None) -> float:
+    """Return the phase-1 stall budget for one completion call.
+
+    The model-aware first-content budget applies to phase 1 as well as phase 2:
+    a new assistant node can take the same silent reasoning time before it
+    appears. With no per-call budgets, preserve the legacy 90-second fallback.
+    """
+    if budgets is None:
+        return PHASE_STALL_SECONDS
+    return budgets.first_content_timeout_seconds
+
 
 # Phrases ChatGPT uses in its rate-limit pop-up. Matched case-insensitively
 # against scanned DOM text. Kept narrow to avoid false positives on normal
@@ -347,6 +365,7 @@ ot_ready`` and must NOT unlock the DOM fallback).
         model_class = classify_model(model) if model else "default"
         # P1: budgets default to legacy behavior when not provided (back-compat).
         use_two_state = budgets is not None
+        phase_1_stall_seconds = resolve_phase_1_stall_seconds(budgets)
 
         # Reset per-call results surfaced to the driver tail.
         self.last_dom_text = ""
@@ -401,7 +420,7 @@ ot_ready`` and must NOT unlock the DOM fallback).
                 last_progress = time.monotonic()
             if current_count > initial_count:
                 break
-            if time.monotonic() - last_progress > PHASE_STALL_SECONDS:
+            if time.monotonic() - last_progress > phase_1_stall_seconds:
                 raise GenerationStuckError("phase_1_appear", time.monotonic() - last_progress)
             await asyncio.sleep(0.5)
         else:

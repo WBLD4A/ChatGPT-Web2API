@@ -16,6 +16,7 @@ import pytest
 from chatgpt_web2api.completion_detector import (
     DetectorBudgets,
     classify_model,
+    resolve_phase_1_stall_seconds,
 )
 
 # ── classify_model ──────────────────────────────────────────────────────
@@ -28,6 +29,7 @@ class TestClassifyModel:
         "gpt-5-4-thinking",
         "gpt-5-5-thinking",
         "gpt-5-4-t-mini",       # "Thinking Mini"
+        "auto",                # selector may choose a reasoning model
         "o3",
         "research",
     ])
@@ -40,7 +42,6 @@ class TestClassifyModel:
         "gpt-5-3",
         "gpt-5-mini",
         "gpt-5-5-mini",
-        "auto",
         "gpt-5.5-wm",
     ])
     def test_non_reasoning_models_classified_as_default(self, slug):
@@ -60,6 +61,10 @@ class TestClassifyModel:
         """Model slugs from the web are lowercase, but be robust."""
         assert classify_model("GPT-5-5-Thinking") == "reasoning"
         assert classify_model("O3") == "reasoning"
+
+    def test_auto_selector_is_classified_as_reasoning(self):
+        """auto can select a slow reasoning model, so use the longer wait."""
+        assert classify_model("auto") == "reasoning"
 
 
 # ── DetectorBudgets ─────────────────────────────────────────────────────
@@ -118,3 +123,26 @@ class TestDetectorBudgets:
         budgets = DetectorBudgets.from_config(cfg, model="gpt-5-5-thinking")
         assert budgets.first_content_timeout_seconds == cfg.detector_reasoning_first_content_timeout_seconds
         assert budgets.stream_idle_timeout_seconds == cfg.detector_reasoning_stream_idle_timeout_seconds
+
+    def test_phase_1_uses_first_content_budget(self):
+        """Phase 1 and phase 2 share the model-aware first-content budget."""
+        assert resolve_phase_1_stall_seconds(None) == 90
+        assert resolve_phase_1_stall_seconds(DetectorBudgets.default()) == 90
+        assert resolve_phase_1_stall_seconds(DetectorBudgets.reasoning()) == 300
+
+    def test_auto_uses_reasoning_budget(self):
+        """The auto selector resolves to the longer configured budget."""
+        from chatgpt_web2api.config import ChatGPTConfig
+
+        cfg = ChatGPTConfig()
+        budgets = DetectorBudgets.from_config(cfg, model="auto")
+        assert budgets.first_content_timeout_seconds == cfg.detector_reasoning_first_content_timeout_seconds
+        assert budgets.stream_idle_timeout_seconds == cfg.detector_reasoning_stream_idle_timeout_seconds
+
+    def test_mcp_wrapper_honors_first_content_budget(self):
+        """The MCP wrapper must not cut off the resolved phase-1 budget."""
+        from chatgpt_web2api.mcp_server import _resolve_completion_timeout
+
+        assert _resolve_completion_timeout(None) == 120
+        assert _resolve_completion_timeout(DetectorBudgets.default()) == 120
+        assert _resolve_completion_timeout(DetectorBudgets.reasoning()) == 300
