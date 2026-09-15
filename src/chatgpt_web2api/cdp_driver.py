@@ -1823,18 +1823,43 @@ class CDPDriver:
             ):
                 yield chunk
 
-            # Wait for URL to become /c/{id}
+            # Prefer the identity verified during completion polling when
+            # the final URL probe is unavailable. This is the safe new-chat
+            # path: the completion detector obtained the id from the existing
+            # continuation state or a live /c/{id} URL, never from a request UUID.
+            resolved_conv_id = getattr(self._completion, "resolved_conversation_id", "") or ""
             conv_id = ""
             for _ in range(30):
                 try:
                     url = await self._js_strict("window.location.href")
-                except CDPJSError:
+                except (CDPJSError, TimeoutError) as probe_error:
+                    if resolved_conv_id:
+                        logger.warning(
+                            "Final conversation URL probe failed (%s); using "
+                            "verified id from completion polling: %s",
+                            probe_error,
+                            resolved_conv_id,
+                        )
+                        conv_id = resolved_conv_id
+                        break
+                    if isinstance(probe_error, TimeoutError):
+                        # A transport timeout without an independently verified
+                        # conversation id is not safe to convert into a result.
+                        raise
                     await asyncio.sleep(0.5)
                     continue
                 if "/c/" in url:
                     conv_id = url.split("/c/")[1].split("/")[0].split("?")[0]
                     break
                 await asyncio.sleep(0.5)
+
+            if not conv_id and resolved_conv_id:
+                logger.info(
+                    "Final URL did not expose a conversation id; using verified "
+                    "id from completion polling: %s",
+                    resolved_conv_id,
+                )
+                conv_id = resolved_conv_id
 
             if conv_id:
                 logger.info("Conversation: %s", conv_id)
