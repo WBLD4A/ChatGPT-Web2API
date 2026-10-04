@@ -781,6 +781,8 @@ async def do_chat_completion(
         await driver.ensure_current_conversation(driver._current_conv_id)
     else:
         await driver.navigate_new_chat(gizmo_id=project_id)
+        if project_id:
+            await driver._ensure_send_ready()
 
     # Send and collect response. Progress notifications reset the MCP client's
     # idle timer during long generations so the tool call isn't killed at
