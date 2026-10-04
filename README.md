@@ -540,6 +540,7 @@ Key docs:
 - [Roadmap](docs/ROADMAP.md) — phases 1–6, what landed, what's deferred
 - [Contributing](CONTRIBUTING.md) — how to contribute
 - [Changelog](CHANGELOG.md) — version history
+- [Local transport validation](docs/local-transport-validation.md) — October 2026 DOM drift fixes and real broker/REST checks
 
 ## Limitations
 

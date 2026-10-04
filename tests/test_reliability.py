@@ -686,13 +686,15 @@ async def test_saw_thinking_unlocks_fallback_but_empty_end_turn_does_not_finish(
     d._fetch_text_for_turn = AsyncMock(return_value=TurnTextResult(status="not_ready"))
     d._fetch_end_turn_for_turn = AsyncMock(return_value=TurnEndResult(status="matched"))
 
-    # is_thinking keeps resetting the stall clock, and the strict content
-    # guard prevents completing on empty. The loop runs to the deadline and
-    # returns WITHOUT emitting any delta — proving the fallback didn't
-    # prematurely complete on an empty end_turn.
+    # A bare end_turn with no correlated text must fail closed rather than
+    # emit a successful empty answer when final reconciliation expires.
+    from chatgpt_web2api.turn_anchor import TurnReconciliationError
     chunks = []
-    async for chunk in d.send_and_stream("think", timeout=5):
-        chunks.append(chunk)
+    with pytest.raises(TurnReconciliationError) as error:
+        async for chunk in d.send_and_stream("think", timeout=5):
+            chunks.append(chunk)
+    assert error.value.last_status == "not_ready"
+    assert not any(c.finish_reason == "stop" for c in chunks)
     assert not any(c.delta for c in chunks), (
         "fallback must not complete an empty answer even with end_turn=true"
     )

@@ -88,11 +88,11 @@ def test_driver_wires_completion():
 
 
 def test_detector_has_only_driver_and_transient_results():
-    """The detector holds _driver plus two transient per-call result attrs
-    (last_dom_text / had_non_text_content). No long-lived config migrates in."""
+    """Only the driver and transient text/content/verified-identity results
+    are retained. No long-lived config migrates in."""
     detector, _ = _make_detector()
     own = vars(detector)
-    assert set(own) == {"_driver", "last_dom_text", "had_non_text_content"}, (
+    assert set(own) == {"_driver", "last_dom_text", "had_non_text_content", "resolved_conversation_id"}, (
         f"unexpected instance state on CompletionDetector: {set(own)}"
     )
 

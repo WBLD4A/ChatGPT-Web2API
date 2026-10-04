@@ -106,6 +106,25 @@ SEND_BUTTON_POLL_INTERVAL_S = 0.3
 SEND_BUTTON_POLL_MAX_WAIT_S = 10.0
 
 
+# ChatGPT renders hidden responsive duplicates of the composer and send
+# controls in existing conversations. Pick the visible, enabled instance for
+# focus, exact-text verification, clearing and sending, consistently.
+VISIBLE_ELEMENT_JS = (
+    "function findVisibleElement(selector) {"
+    "  var elements = document.querySelectorAll(selector);"
+    "  for (var i = 0; i < elements.length; i++) {"
+    "    var el = elements[i];"
+    "    var rect = el.getBoundingClientRect();"
+    "    var style = window.getComputedStyle(el);"
+    "    if (rect.width > 0 && rect.height > 0 && !el.disabled && !el.readOnly"
+    "        && style.visibility !== 'hidden' && style.visibility !== 'collapse'"
+    "        && !el.closest('[hidden], [inert], [aria-hidden=\"true\"]')) return el;"
+    "  }"
+    "  return null;"
+    "}"
+)
+
+
 class ChatGPTDom:
     """ChatGPT-composer DOM interaction, composed by ``CDPDriver``.
 
@@ -135,10 +154,10 @@ class ChatGPTDom:
         d = self._driver
         try:
             result = await d._js(
-                "(function(){"
+                "(function(){" + VISIBLE_ELEMENT_JS +
                 f"  return JSON.stringify({{"
-                f"    ready: !!document.querySelector('{COMPOSER_SELECTOR}')"
-                f"         || !!document.querySelector('{COMPOSER_FALLBACK_SELECTOR}')"
+                f"    ready: !!findVisibleElement('{COMPOSER_SELECTOR}')"
+                f"         || !!findVisibleElement('{COMPOSER_FALLBACK_SELECTOR}')"
                 "  });"  # {{ opens the object literal; a single } closes it
                 "})()"
             )
@@ -213,10 +232,10 @@ class ChatGPTDom:
         # legacy textarea fallback. Returns which one was focused (or
         # 'no composer') so the verify step reads the right element.
         focus_result = await d._js(
-            "(function() {"
-            f"  var el = document.querySelector('{COMPOSER_SELECTOR}');"
+            "(function() {" + VISIBLE_ELEMENT_JS +
+            f"  var el = findVisibleElement('{COMPOSER_SELECTOR}');"
             "  if (el) { el.focus(); return 'composer'; }"
-            f"  var fb = document.querySelector('{COMPOSER_FALLBACK_SELECTOR}');"
+            f"  var fb = findVisibleElement('{COMPOSER_FALLBACK_SELECTOR}');"
             "  if (fb) { fb.focus(); return 'fallback'; }"
             "  return 'no composer';"
             "})()"
@@ -273,8 +292,8 @@ class ChatGPTDom:
                 "Composer text mismatch on first insert; retrying with execCommand clear"
             )
             await d._js_strict(
-                "(function(){"
-                f"  var el = document.querySelector('{verify_selector}');"
+                "(function(){" + VISIBLE_ELEMENT_JS +
+                f"  var el = findVisibleElement('{verify_selector}');"
                 "  if (el) {"
                 "    if (el.tagName === 'TEXTAREA') {"
                 "      el.focus(); el.select();"
@@ -355,8 +374,8 @@ class ChatGPTDom:
         d = self._driver
         try:
             actual = await d._js_strict(
-                "(function(){"
-                f"  var el = document.querySelector('{selector}');"
+                "(function(){" + VISIBLE_ELEMENT_JS +
+                f"  var el = findVisibleElement('{selector}');"
                 "  if (!el) return '';"
                 "  if (el.tagName === 'TEXTAREA') return el.value;"
                 # Recursive DOM extractor: walks all descendant nodes,
@@ -439,10 +458,10 @@ class ChatGPTDom:
         deadline = time.monotonic() + SEND_BUTTON_POLL_MAX_WAIT_S
         while time.monotonic() < deadline:
             has_btn = await d._js(
-                "(function() {"
-                f"  var btn = document.querySelector('{SEND_BUTTON_SELECTOR}')"
-                f"       || document.querySelector('{SEND_BUTTON_FALLBACK_SELECTOR}')"
-                f"       || document.querySelector('{SEND_BUTTON_BROAD_SELECTOR}');"
+                "(function() {" + VISIBLE_ELEMENT_JS +
+                f"  var btn = findVisibleElement('{SEND_BUTTON_SELECTOR}')"
+                f"       || findVisibleElement('{SEND_BUTTON_FALLBACK_SELECTOR}')"
+                f"       || findVisibleElement('{SEND_BUTTON_BROAD_SELECTOR}');"
                 "  return btn && !btn.disabled ? 'yes' : 'no';"
                 "})()"
             )
@@ -451,10 +470,10 @@ class ChatGPTDom:
             await asyncio.sleep(SEND_BUTTON_POLL_INTERVAL_S)
 
         result = await d._js(
-            "(function() {"
-            f"  var btn = document.querySelector('{SEND_BUTTON_SELECTOR}')"
-            f"       || document.querySelector('{SEND_BUTTON_FALLBACK_SELECTOR}')"
-            f"       || document.querySelector('{SEND_BUTTON_BROAD_SELECTOR}');"
+            "(function() {" + VISIBLE_ELEMENT_JS +
+            f"  var btn = findVisibleElement('{SEND_BUTTON_SELECTOR}')"
+            f"       || findVisibleElement('{SEND_BUTTON_FALLBACK_SELECTOR}')"
+            f"       || findVisibleElement('{SEND_BUTTON_BROAD_SELECTOR}');"
             "  if (!btn) return 'no send button';"
             "  if (btn.disabled) return 'button disabled';"
             "  var evts = ['pointerdown','mousedown','pointerup','mouseup','click'];"

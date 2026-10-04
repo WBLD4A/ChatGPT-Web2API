@@ -374,10 +374,19 @@ async def test_post_loop_timeout_without_verified_identity_remains_fail_closed(m
         return_value=TurnTextResult(status="matched", text="Answer.")
     )
 
+    # Isolate the post-loop URL probe. Without this stub the fake DOM has
+    # no completion signal and stalls in phase 2 before reaching the probe.
+    async def completed_detector(**kwargs):
+        if False:
+            yield
+    d._completion.stream_until_complete = completed_detector
+    d._completion.resolved_conversation_id = ""
+    d._completion.last_dom_text = "Answer."
     chunks = []
-    async for chunk in d.send_and_stream("hello", timeout=10000):
-        chunks.append(chunk)
+    with pytest.raises(TimeoutError, match="CDP timeout"):
+        async for chunk in d.send_and_stream("hello", timeout=10000):
+            chunks.append(chunk)
 
     assert d._current_conv_id is None
     assert d._fetch_text_for_turn.await_count == 0
-    assert chunks[-1].finish_reason == "stop"
+    assert not any(c.finish_reason == "stop" for c in chunks)

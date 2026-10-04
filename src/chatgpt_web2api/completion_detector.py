@@ -386,6 +386,7 @@ ot_ready`` and must NOT unlock the DOM fallback).
         deadline = time.monotonic() + timeout
         last_node_count = initial_count
         last_progress = time.monotonic()
+        last_appear_backend_check = last_progress
         while time.monotonic() < deadline:
             # First check for ChatGPT's rate-limit pop-up — if present, fail
             # fast with a clear error instead of waiting out the whole timeout.
@@ -420,6 +421,35 @@ ot_ready`` and must NOT unlock the DOM fallback).
                 last_progress = time.monotonic()
             if current_count > initial_count:
                 break
+            # The message-role DOM attributes can disappear after a ChatGPT
+            # UI rollout. Do not gate the authoritative backend on a DOM node
+            # appearing: a completed response may already exist there. Read
+            # only the terminal text correlated to this send's immutable
+            # anchor; ambiguous, stale, empty and unfinished turns never pass.
+            # This is observation only, with no resend or new conversation.
+            if time.monotonic() - last_appear_backend_check >= 3.0:
+                last_appear_backend_check = time.monotonic()
+                try:
+                    conv_id = await d._get_live_conversation_id_best_effort()
+                    if isinstance(conv_id, str) and conv_id:
+                        self.resolved_conversation_id = conv_id
+                        response = await d._fetch_text_for_turn(conv_id, turn_anchor)
+                        if (
+                            response.status == "matched"
+                            and isinstance(response.text, str)
+                            and response.text.strip()
+                        ):
+                            logger.info(
+                                "Anchored backend response completed before assistant DOM appeared: %s",
+                                conv_id,
+                            )
+                            # The driver tail performs its normal anchored
+                            # reconciliation and emits the authoritative text.
+                            return
+                except (AuthExpiredError, RateLimitError):
+                    raise
+                except Exception as e:
+                    logger.debug("Phase-1 anchored observation failed: %s", e)
             if time.monotonic() - last_progress > phase_1_stall_seconds:
                 raise GenerationStuckError("phase_1_appear", time.monotonic() - last_progress)
             await asyncio.sleep(0.5)
