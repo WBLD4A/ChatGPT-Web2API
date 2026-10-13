@@ -162,7 +162,7 @@ class ChatGPTDom:
             await asyncio.sleep(0.5)
         return False
 
-    async def _ensure_send_ready(self) -> None:
+    async def _ensure_send_ready(self, gizmo_id: str | None = None) -> None:
         """Guarantee the live tab can accept a typed message.
 
         ``connect()`` may attach to a ``chatgpt.com/`` home/landing tab (or
@@ -187,7 +187,10 @@ class ChatGPTDom:
             "Attached tab has no composer after waiting; navigating to a new chat "
             "to become send-ready"
         )
-        await d.navigate_new_chat()  # navigates to ?model=auto + polls composer
+        if gizmo_id:
+            await d.navigate_new_chat(gizmo_id=gizmo_id)
+        else:
+            await d.navigate_new_chat()
         if not await d._wait_for_composer(timeout=5):
             await d._capture_selector_diagnostic("composer (connect send-ready)")
             if d._breakers:
