@@ -1263,14 +1263,34 @@ class CDPDriver:
         Delegated to ChatGPTDom (Phase 5 PR3 extraction)."""
         return await self._dom._has_composer()
 
-    async def _ensure_send_ready(self) -> None:
-        """Guarantee the live tab can accept a typed message.
+    async def _ensure_send_ready(self, gizmo_id: str | None = None) -> None:
+        """Guarantee a send-capable composer in the requested context.
 
-        Delegated to ChatGPTDom (Phase 5 PR3 extraction). Preserved exactly:
-        poll-then-navigate-via-``navigate_new_chat``, COMPOSER_SEND_READINESS
-        breaker record_failure on persistent failure (registry stays on driver).
+        Non-project startup retains its existing readiness recovery. Project
+        sends preserve the project on fallback and verify the live URL before
+        sending, rather than silently accepting an unscoped composer.
         """
-        await self._dom._ensure_send_ready()
+        if not gizmo_id:
+            await self._dom._ensure_send_ready()
+            return
+
+        await self._dom._ensure_send_ready(gizmo_id=gizmo_id)
+        try:
+            actual_url = await self._js_strict("location.href")
+            parsed = urllib.parse.urlsplit(actual_url or "")
+        except (CDPJSError, TypeError, ValueError) as exc:
+            raise SendReadinessError("Cannot verify requested project context") from exc
+
+        parts = parsed.path.strip("/").split("/")
+        if not (
+            parsed.scheme == "https"
+            and parsed.netloc == "chatgpt.com"
+            and (
+                parts == ["g", gizmo_id, "project"]
+                or (len(parts) == 4 and parts[:3] == ["g", gizmo_id, "c"] and bool(parts[3]))
+            )
+        ):
+            raise SendReadinessError("Send readiness lost the requested project context")
 
     async def _wait_for_composer(self, timeout: float = 8) -> bool:
         """Poll until a composer appears, or *timeout* seconds elapse.

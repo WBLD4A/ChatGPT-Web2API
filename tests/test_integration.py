@@ -14,13 +14,14 @@ No real Chrome / ChatGPT connection is required: the CDPDriver is mocked,
 so we verify the *server's* behavior, not the upstream account.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 import chatgpt_web2api.mcp_server as mod
-from chatgpt_web2api.cdp_driver import StreamChunk
+from chatgpt_web2api.cdp_driver import CDPDriver, StreamChunk
+from chatgpt_web2api.chatgpt_dom import ChatGPTDom
 from chatgpt_web2api.mcp_server import (
     DESTRUCTIVE_ENV,
     WRITE_ENV,
@@ -50,6 +51,7 @@ def make_mock_driver():
     driver.select_model = AsyncMock(return_value=True)
     driver.send_and_stream = _stream
     driver.navigate_new_chat = AsyncMock()
+    driver._ensure_send_ready = AsyncMock()
     driver.navigate_conversation = AsyncMock()
     driver.navigate_gpt = AsyncMock()
     driver.get_models = AsyncMock(return_value=[
@@ -164,6 +166,80 @@ async def test_client_calls_chat_completion(monkeypatch):
         )
         assert result.isError is not True
         assert "Mocked ChatGPT response" in result.content[0].text
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_project_chat_completion_waits_for_send_readiness_before_stream(monkeypatch):
+    """Project navigation must establish a usable composer before streaming."""
+    clear_gate_envs(monkeypatch)
+    driver = make_mock_driver()
+    events = []
+
+    async def ensure_ready(*, gizmo_id):
+        assert gizmo_id == "g-p-project"
+        events.append("ready")
+
+    driver._ensure_send_ready = AsyncMock(side_effect=ensure_ready)
+    original_stream = driver.send_and_stream
+
+    async def recording_stream(*args, **kwargs):
+        events.append("stream")
+        async for chunk in original_stream(*args, **kwargs):
+            yield chunk
+
+    driver.send_and_stream = recording_stream
+    monkeypatch.setattr(mod, "_driver", driver)
+    monkeypatch.setattr(mod, "_config", None)
+
+    server = mod.create_server()
+    ctx, session = await _session_for(server)
+    try:
+        result = await session.call_tool(
+            "chat_completion",
+            {"message": "Hello", "project_id": "g-p-project"},
+        )
+        assert result.isError is not True
+        assert result.structuredContent["content"] == "Mocked ChatGPT response"
+        assert events == ["ready", "stream"]
+        driver.navigate_new_chat.assert_awaited_once_with(gizmo_id="g-p-project")
+        driver._ensure_send_ready.assert_awaited_once_with(gizmo_id="g-p-project")
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_project_chat_completion_does_not_send_after_unscoped_fallback(monkeypatch):
+    clear_gate_envs(monkeypatch)
+    driver = make_mock_driver()
+    driver._dom = ChatGPTDom(driver)
+    driver._ensure_send_ready = CDPDriver._ensure_send_ready.__get__(driver, CDPDriver)
+    driver._wait_for_composer = AsyncMock(side_effect=[False, True])
+    driver._js_strict = AsyncMock(return_value="https://chatgpt.com/?model=auto")
+    streamed = []
+
+    async def forbidden_stream(*args, **kwargs):
+        streamed.append(True)
+        yield StreamChunk(delta="Must not send")
+
+    driver.send_and_stream = forbidden_stream
+    monkeypatch.setattr(mod, "_driver", driver)
+    monkeypatch.setattr(mod, "_config", None)
+
+    server = mod.create_server()
+    ctx, session = await _session_for(server)
+    try:
+        result = await session.call_tool(
+            "chat_completion",
+            {"message": "Hello", "project_id": "g-p-project"},
+        )
+        assert result.isError is True
+        assert streamed == []
+        assert driver.navigate_new_chat.await_args_list == [
+            call(gizmo_id="g-p-project"),
+            call(gizmo_id="g-p-project"),
+        ]
     finally:
         await ctx.__aexit__(None, None, None)
 

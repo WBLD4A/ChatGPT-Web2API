@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from chatgpt_web2api.cdp_driver import CDPDriver
+from chatgpt_web2api.cdp_driver import CDPDriver, CDPJSError, SendReadinessError
 
 # ── 1. Static URL matcher ─────────────────────────────────────────────
 
@@ -394,6 +394,63 @@ async def test_ensure_send_ready_fail_closed_when_composer_still_absent():
     d._capture_selector_diagnostic.assert_awaited_once_with(
         "composer (connect send-ready)"
     )
+
+
+@pytest.mark.asyncio
+async def test_project_ensure_send_ready_recovery_preserves_project():
+    d = CDPDriver(cdp_port=9222)
+    d._wait_for_composer = AsyncMock(side_effect=[False, True])
+    d.navigate_new_chat = AsyncMock()
+    d._js_strict = AsyncMock(return_value="https://chatgpt.com/g/g-p-project/project")
+
+    await d._ensure_send_ready(gizmo_id="g-p-project")
+
+    d.navigate_new_chat.assert_awaited_once_with(gizmo_id="g-p-project")
+    d._js_strict.assert_awaited_once_with("location.href")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landing_url", [
+    "https://chatgpt.com/?model=auto",
+    "https://chatgpt.com/g/g-p-other/project",
+    "https://chatgpt.com/g/g-p-project-other/project",
+    "https://chatgpt.com.evil.example/g/g-p-project/project",
+])
+async def test_project_ensure_send_ready_rejects_wrong_context(landing_url):
+    d = CDPDriver(cdp_port=9222)
+    d._wait_for_composer = AsyncMock(side_effect=[False, True])
+    d.navigate_new_chat = AsyncMock()
+    d._js_strict = AsyncMock(return_value=landing_url)
+
+    with pytest.raises(SendReadinessError, match="requested project"):
+        await d._ensure_send_ready(gizmo_id="g-p-project")
+
+    d.navigate_new_chat.assert_awaited_once_with(gizmo_id="g-p-project")
+
+
+@pytest.mark.asyncio
+async def test_project_ensure_send_ready_rejects_unreadable_url():
+    d = CDPDriver(cdp_port=9222)
+    d._wait_for_composer = AsyncMock(return_value=True)
+    d.navigate_new_chat = AsyncMock()
+    d._js_strict = AsyncMock(side_effect=CDPJSError("tab inaccessible"))
+
+    with pytest.raises(SendReadinessError, match="Cannot verify"):
+        await d._ensure_send_ready(gizmo_id="g-p-project")
+
+    d.navigate_new_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_project_ensure_send_ready_accepts_project_conversation():
+    d = CDPDriver(cdp_port=9222)
+    d._wait_for_composer = AsyncMock(return_value=True)
+    d.navigate_new_chat = AsyncMock()
+    d._js_strict = AsyncMock(return_value="https://chatgpt.com/g/g-p-project/c/conv-123")
+
+    await d._ensure_send_ready(gizmo_id="g-p-project")
+
+    d.navigate_new_chat.assert_not_awaited()
 
 
 def test_has_composer_parses_ready_flag_from_js():
