@@ -1616,7 +1616,8 @@ class CDPDriver:
         Polls briefly (3s at 0.5s intervals). Never raises.
         """
         import time as _time
-        from .chatgpt_dom import COMPOSER_SELECTOR, COMPOSER_FALLBACK_SELECTOR
+
+        from .chatgpt_dom import COMPOSER_FALLBACK_SELECTOR, COMPOSER_SELECTOR
 
         pre_send_count = getattr(self, "_pre_send_user_count", None)
         if pre_send_count is None:
@@ -1660,6 +1661,55 @@ class CDPDriver:
         # If we got valid probes but none showed acknowledgment, return False.
         # If no valid probe was ever obtained (all CDP errors), return None.
         return False if valid_probe_seen else None
+
+    async def _verify_backend_send_acknowledged(self, anchor) -> bool:
+        """Observe the exact fresh submitted user node when message DOM roles disappear.
+
+        Never sends a prompt, accepts an arbitrary URL as proof, or changes the
+        completion anchor. Missing, stale, ambiguous and degraded matches fail closed.
+        """
+        from .turn_anchor import (
+            SKEW_TOLERANCE_SECONDS,
+            TurnAnchor,
+            _node_create_time,
+            _resolve_user_node,
+        )
+
+        if not isinstance(anchor, TurnAnchor) or anchor.pre_send_wall_time is None:
+            return False
+        for attempt in range(3):
+            conv_id = await self._conversation_id_from_url()
+            if conv_id and (
+                anchor.conversation_id_at_capture is None
+                or conv_id == anchor.conversation_id_at_capture
+            ):
+                try:
+                    mapping = await self._backend_client._fetch_recent_conversation_projection(conv_id)
+                    user_id, reason = _resolve_user_node(mapping, anchor)
+                    nodes = mapping.get('nodes') or mapping.get('mapping') or {}
+                    if not user_id:
+                        from .turn_anchor import _node_role, _node_text, normalize_text
+                        expected_text = normalize_text(anchor.sent_text)
+                        candidates = []
+                        for node in nodes.values():
+                            if _node_role(node) != 'user':
+                                continue
+                            actual_text = normalize_text(_node_text(node))
+                            difference = next((i for i, (a, b) in enumerate(zip(expected_text, actual_text)) if a != b), None)
+                            candidates.append({'length': len(actual_text), 'first_difference': difference, 'time_delta': _node_create_time(node) - anchor.pre_send_wall_time})
+                        logger.warning('Backend ack mismatch: reason=%s expected_length=%s candidates=%s', reason, len(expected_text), candidates)
+                    if user_id and user_id in nodes and _node_create_time(nodes[user_id]) >= (
+                        anchor.pre_send_wall_time - SKEW_TOLERANCE_SECONDS
+                    ):
+                        logger.info('Backend send acknowledged: conversation=%s reason=%s', conv_id, reason)
+                        return True
+                except (AuthExpiredError, RateLimitError):
+                    raise
+                except Exception as error:
+                    logger.debug('Backend send acknowledgment unavailable: %s', error)
+            if attempt < 2:
+                await asyncio.sleep(0.5)
+        return False
 
     async def _capture_pre_send_fallback_anchor(self, text: str):
         """A2: build the pre-send fallback TurnAnchor (NO captured UUID yet).
@@ -1744,6 +1794,7 @@ class CDPDriver:
         *,
         budgets=None,
         model: str | None = None,
+        attachments=None,
     ) -> AsyncIterator[StreamChunk]:
         """Send a message and yield streaming response chunks.
 
@@ -1761,11 +1812,19 @@ class CDPDriver:
         9. ALWAYS: scope.close() in finally (clears capture state on every
            terminal path — success, timeout, exception, cancellation).
         """
+        from .attachments import (
+            AttachmentUploadError,
+            discard_pending_attachments,
+            upload_attachments,
+        )
         from .identity_listener import hash_sent_text
         from .turn_anchor import TurnReconciliationError
 
         # PR4 belt-and-suspenders: refuse to mutate the DOM in parallel mode.
         self._assert_owned_tab_required()
+        if getattr(self, "_attachment_state_dirty", False):
+            raise AttachmentUploadError("Unverified composer attachments remain; reconnect the worker")
+        attachments_pending = False
         # A1: count existing assistants BEFORE sending (fail-closed baseline).
         initial_count = await self._read_assistant_count_baseline()
 
@@ -1788,6 +1847,9 @@ class CDPDriver:
         try:
             # Type and send.
             await self.type_message(text)
+            if attachments:
+                attachments_pending = True
+                await upload_attachments(self, attachments)
             await self.click_send()
 
             # A2 Step 6: wait for the IdentityListener to capture the UUID.
@@ -1813,13 +1875,16 @@ class CDPDriver:
                 try:
                     acknowledged = await self._verify_send_acknowledged()
                     if acknowledged is False:  # explicitly False, not None
+                        acknowledged = await self._verify_backend_send_acknowledged(fallback_anchor)
+                    if acknowledged is False:
+                        await self._capture_selector_diagnostic('send not acknowledged')
                         raise SendReadinessError(
                             "Send not acknowledged — click dispatched but no user "
                             "message appeared (no UUID captured, user count unchanged, "
                             "composer not cleared). The page may be overloaded or the "
                             "send was rejected. Do NOT retry automatically."
                         )
-                except SendReadinessError:
+                except (SendReadinessError, AuthExpiredError, RateLimitError):
                     raise
                 except Exception as ack_err:
                     # Probe failed (JS error, mock, unusual DOM). Don't block
@@ -1945,6 +2010,9 @@ class CDPDriver:
             # A2 Step 9: ALWAYS clear the capture scope (failure-mode E).
             if capture_scope is not None:
                 capture_scope.close()
+
+            if attachments_pending:
+                await discard_pending_attachments(self)
 
         yield StreamChunk(delta="", finish_reason="stop")
 

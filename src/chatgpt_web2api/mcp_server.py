@@ -40,8 +40,9 @@ from typing import Any
 from mcp import types as mcp_types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from .attachments import InlineAttachment, validate_attachments
 from .breakers import BreakerKind, BreakerRegistry, CircuitOpenError
 from .cdp_driver import (
     AuthExpiredError,
@@ -84,7 +85,14 @@ _DEFAULT_COMPLETION_TIMEOUT_SECONDS = 120
 class ChatCompletionInput(BaseModel):
     """Input schema for chat_completion tool."""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     message: str = Field(description="The user message to send to ChatGPT")
+    attachments: list[InlineAttachment] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Real conversation files: name, mime_type and base64 content; 10 MiB per file, 20 MiB per turn. Never local paths.",
+    )
     system_prompt: str | None = Field(
         default=None,
         description=(
@@ -749,6 +757,7 @@ async def do_chat_completion(
 ) -> dict:
     """Execute a chat completion through the CDP driver."""
     validated = ChatCompletionInput(**args)
+    validate_attachments(validated.attachments)
     project_id = validated.project_id or (config.chatgpt.default_project_id if config else None)
 
     # Build the full text with optional system prompt
@@ -803,8 +812,10 @@ async def do_chat_completion(
         else None
     )
     completion_timeout = _resolve_completion_timeout(_budgets)
+    attachment_kwargs = {"attachments": validated.attachments} if validated.attachments else {}
     async for chunk in driver.send_and_stream(
         full_text, timeout=completion_timeout, budgets=_budgets, model=validated.model,
+        **attachment_kwargs,
     ):
         if chunk.delta:
             full_response += chunk.delta

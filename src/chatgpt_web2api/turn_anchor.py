@@ -42,6 +42,7 @@ from __future__ import annotations
 # can still pass). For rapid same-text repeats, the selector returns ``ambiguous``
 # or ``not_ready`` rather than silently picking. Env-overridable for canary tuning.
 import os as _os
+import re
 import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Literal
@@ -196,6 +197,12 @@ def normalize_text(s: str) -> str:
     """
     if not s:
         return ""
+    # The editor serializes bare URLs as Markdown links with the same URL
+    # as label, and encodes trailing spaces as &#x20;. Restore only these
+    # representation changes; never replace links with different labels.
+    s = re.sub(r"\[(https?://[^\s\]]+)\]\(\1\)", r"\1", s)
+    s = re.sub(r"&#x20;(?=\r?\n|$)", " ", s)
+    s = s.replace("\u00a0", " ")
     # NFC normalization (compose decomposed characters).
     s = unicodedata.normalize("NFC", s)
     # CRLF / CR → LF.
